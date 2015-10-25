@@ -1,0 +1,542 @@
+---
+title: "Practical Machine Learning Project Report"
+output: html_document
+---
+Author: Milen Ivanov
+
+## Background
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it.
+
+The survey 6 participants were asked to perform barbell lifts correctly and incorrectly in 5 different ways (A - exactly according to the specification, B-elbows to the front, C-lifting the dumbbell only halfway,D-lowering the dumbbell only halfway, E-throwing the hips to the front) while the data were collected on accelerometers on the belt, forearm, arm, and dumbell.
+
+More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+## The project goal - the main question
+The goal of this project is by using these collected data to predict the manner (A-E) in which the participants did the exercise.
+This is the "classe" variable in the training set - response.
+
+According to the instructions from Professor Leek, the project report should include the following information:
+* how the model was built
+* how cross validation was used
+* what is the expected out of sample error
+* explanation of the choices made
+
+Finally the chosen model has to be used for precition of 20 test cases from a separate test set. 
+
+## R Packages used in the report
+install.packages("caret")
+install.packages("lattice")
+install.packages("ggplot2")
+install.packages("pROC")
+install.packages("doParallel")
+install.packages("randomForest")
+install.packages("e1071")
+install.packages("gbm")
+
+
+## The source data
+The training data for this project are available here: 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here: 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. 
+
+## Download  training and testing data
+```{r}
+# checking if the folder for data exists, if not  - create it
+ifelse(c(setwd("~/"),!file.exists("data")),c(dir.create("data"),setwd("data")),setwd("data"))
+
+# download the train and test data
+urlTrain <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+urlTest <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+destfileTrain <- "dataTrain.csv"
+destfileTest <- "dataTest.csv"
+
+download.file(urlTrain, destfileTrain)
+download.file(urlTest, destfileTest)
+
+# read train and test file
+dataTrain = read.csv(file=urlTrain, na.strings=c("NA","","#DIV/0!"),header = TRUE)
+dataTest = read.csv(file=urlTest, na.strings=c("NA","","#DIV/0!"),header = TRUE)
+
+dim(dataTrain)
+str(dataTrain)
+
+dim(dataTest)
+str(dataTest)
+```
+
+## Clean train and test data
+The train data set consists of 160 variables and 19622 rows. The test set consists of 160 variables and 20 rows.
+The first review of the data shows a lot of NAs in different forms, so I read in the data again (read.csv) including the full range for na.strings=c("NA","","#DIV/0!").
+
+## Data slicing
+Since the test set with 20 rows is given for the final prediction of the 20 test cases, I will not use it for the model training and cross validation purposes. Instead, I slice the training set into subsets for training (f1Train) and for testing (f1Test) on response variable "classe" at the ratio 10/90 for cross validation. Despite the recommended ratio of 60/40 for train/test sets, I will first try to build the models only on 10% of the data (1964 samples only) in order to have quick response time. Once the model and the code is ready if the accuracy of prediction is unsatisfactory I will train the model again on a larger sample size.
+
+```{r}
+library("caret")
+library("lattice")
+library("ggplot2")
+
+set.seed(7812)
+inTrain <- createDataPartition(y=dataTrain$classe, p=0.10, list=FALSE) 
+f1Train <- dataTrain[inTrain, ]
+f1Test <- dataTrain[-inTrain, ]
+
+dim(f1Train); dim(f1Test)
+```
+
+## Pre-processing and cleaning
+
+Since the number of not available data (NAs) is very high I decide to discard the variables where the share of NAs is higher than 70% as irrelevant for prediction. In case the share of NAs is less than 30% I will impute the data.The analysis shows that all NAs will be discarded (100 variables will be removed).
+
+```{r}
+# Count the share of NAs in every column (cannot use mean, because it requires numeric or logical argument)
+checkNAf1Train <- sapply(f1Train, function(x) {length(x[is.na(x)])/length(x)})   
+checkNAf1Test <- sapply(f1Test, function(x) {length(x[is.na(x)])/length(x)})  
+checkNAdataTest <- sapply(dataTest, function(x) {length(x[is.na(x)])/length(x)})  
+
+# Add condition for variables: if the count of NAs is more than 70% then remove them from the data set
+remf1Train <- checkNAf1Train[checkNAf1Train > 0.3]
+remf1Test <- checkNAf1Test[checkNAf1Test > 0.3]
+remdataTest <- checkNAdataTest[checkNAdataTest > 0.3]
+
+length(remf1Train)
+length(remf1Test)
+length(remdataTest)
+
+impf1Train <- checkNAf1Train[checkNAf1Train < 0.3 & checkNAf1Train > 0]
+impf1Test <- checkNAf1Test[checkNAf1Test < 0.3 & checkNAf1Test > 0]
+impdataTest <- checkNAdataTest[checkNAdataTest < 0.3 & checkNAdataTest > 0]
+
+length(impf1Train); length(impf1Test); length(impdataTest)
+
+# Impute NAs that are less than 30% of the total count of values - no such values
+# preProcess(imp,method="knnImpute")
+
+# Remove Variables with the count of NAs bigger than 30% of the total count of values. 
+NAclean_f1Train <- f1Train[,!(names(f1Train) %in% names(remf1Train))]
+NAclean_f1Test <- f1Test[,!(names(f1Test) %in% names(remf1Test))]
+NAclean_dataTest <- dataTest[,!(names(dataTest) %in% names(remdataTest))]
+
+```
+
+## Predictor variables selection
+From the left amount of 60 variables I exclude those with coding information only (the first 7) as not important for prediction.
+Then I check for other variables not significant for prediction like Near zero variance variables, linearly correlated variables or variables with relatively low significance.
+
+## Exclude the first 7 variables as coding variables
+```{r}
+NA.Meta.clean_f1Train <- NAclean_f1Train[,-c(1:7)]
+NA.Meta.clean_f1Test <- NAclean_f1Test[,-c(1:7)]
+NA.Meta.clean_dataTest <- NAclean_dataTest[,-c(1:7)]
+
+dim(NA.Meta.clean_f1Train); dim(NA.Meta.clean_f1Test); dim(NA.Meta.clean_dataTest)
+```
+
+## Identify near zero variance variables and exclude them as insignificant for prediction - no NZV identified:
+```{r}
+# Identify near zero variance variables
+checkNZV1 <- nearZeroVar(NA.Meta.clean_f1Train,saveMetrics=TRUE)
+checkNZV2 <- nearZeroVar(NA.Meta.clean_f1Test,saveMetrics=TRUE)
+checkNZV3 <- nearZeroVar(NA.Meta.clean_dataTest,saveMetrics=TRUE)
+
+# Exclude NZV; transpose and subset
+checkNZV1t <-t(checkNZV1[checkNZV1$nzv=="TRUE",]) 
+checkNZV2t <-t(checkNZV2[checkNZV2$nzv=="TRUE",])
+checkNZV3t <-t(checkNZV3[checkNZV3$nzv=="TRUE",])
+
+checkNZV1t <- as.data.frame(checkNZV1t)
+checkNZV2t <- as.data.frame(checkNZV2t)
+checkNZV3t <- as.data.frame(checkNZV3t)
+
+names(checkNZV1t); names(checkNZV2t); names(checkNZV3t)
+
+# Since no NZV were identified the code for removing them is obsolete, but anyway it would be like:
+NA.Meta.nzv.clean_f1Train <- NA.Meta.clean_f1Train[,!(names(NA.Meta.clean_f1Train) %in% names(checkNZV1t))]
+NA.Meta.nzv.clean_f1Test <- NA.Meta.clean_f1Test[,!(names(NA.Meta.clean_f1Test) %in% names(checkNZV2t))]
+NA.Meta.nzv.clean_dataTest <- NA.Meta.clean_dataTest[,!(names(NA.Meta.clean_dataTest) %in% names(checkNZV3t))]
+
+```
+
+
+```{r}
+#Check for linear correlated variables that may show redundancies not important for prediction: - no such variables
+findLinearCombos(NA.Meta.nzv.clean_f1Train[,-length(names(NA.Meta.nzv.clean_f1Train))])
+
+```
+
+## Check for correlated variables using findCorrelation:
+This function searches through a correlation matrix and returns a vector of integers corresponding to columns to remove to reduce pair-wise correlations - resulting to selection of 13 variables, resp.12 predictors. 
+```{r}
+corrVar <- findCorrelation(NA.Meta.nzv.clean_f1Train[,-length(names(NA.Meta.nzv.clean_f1Train))], cutoff = 0.9, verbose = FALSE, names = TRUE, exact = FALSE)
+corrVar
+
+# Adjust the data set. After removing the number of variables was reduced to 13 variables, resp.12 predictors.
+corExperimentF1Tr <- NA.Meta.nzv.clean_f1Train[,!(names(NA.Meta.nzv.clean_f1Train) %in% corrVar)]
+corExperimentF1Tst <- NA.Meta.nzv.clean_f1Test[,!(names(NA.Meta.nzv.clean_f1Test) %in% corrVar)]
+corExperimentDataTst <- NA.Meta.nzv.clean_dataTest[,!(names(NA.Meta.nzv.clean_dataTest) %in% corrVar)]
+str(corExperimentF1Tr)
+
+```
+
+## Check for individual variable importance in the dataset:
+I calculate the mean variable importance among the categories in "classe" (A-E) for every variable and decide to take those that have mean variable importance higher than 60% - resulting to selection of 22 variables, resp.21 predictors.
+
+```{r}
+library(pROC)
+library(caret)
+
+VImP <- filterVarImp(x = NA.Meta.nzv.clean_f1Train[,-length(names(NA.Meta.nzv.clean_f1Train))], y = NA.Meta.nzv.clean_f1Train[,length(names(NA.Meta.nzv.clean_f1Train))], nonpara = TRUE)
+VImP
+
+VImPt <-t(VImP)
+VImPt <- as.data.frame(VImPt)
+names(VImPt) <- names(VImPt[1,])
+
+# Take the average vimp for "classe"
+VImPtS <- sapply(VImPt, mean, USE.NAMES = TRUE) 
+VImPtSo <- VImPtS[order(VImPtS, decreasing = TRUE)]
+
+# try to select the variables with importance > 60%
+VImPtSoK <- VImPtSo[VImPtSo > 0.6]
+
+# adjust the data set
+vipExperimentF1Tr <- NA.Meta.nzv.clean_f1Train[,names(NA.Meta.nzv.clean_f1Train) %in% c(names(VImPtSoK),"classe")]
+vipExperimentF1Tst <- NA.Meta.nzv.clean_f1Test[,names(NA.Meta.nzv.clean_f1Test) %in% c(names(VImPtSoK),"classe")]
+vipExperimentDataTst <- NA.Meta.nzv.clean_dataTest[,names(NA.Meta.nzv.clean_dataTest) %in% c(names(VImPtSoK),"classe")]
+
+str(vipExperimentF1Tr)
+
+```
+Based on this analysis I will use three scenarios for the model training: 
+* 1. training set with 13 variables, resp.12 predictors. 
+* 2. training set with 22 variables, resp.21 predictors.
+* 3. training set with 53 variables, resp.52 predictors. 
+
+
+## Exploratory data analysis
+
+Data from scenario 1 :selection of 13 variables, resp.12 predictors is used for data analysis before choosing which models to use for prediction - however no strong pattern is obvious
+```{r}
+library(ggplot2)
+library(caret)
+
+# From the feature plot I do not identify any strong or obvious patterns
+featurePlot(x=corExperimentF1Tr[,-length(names(corExperimentF1Tr))],
+            y=corExperimentF1Tr[,length(names(corExperimentF1Tr))],
+            plot="pairs")
+
+```
+
+
+## Algorithm - building the model
+
+Based on the lack of any obvious pattern in the data and having in mind the note of Prof. Leek that Random Forests method is usually one of the two top performing algorithms along with boosting in any prediction contests, I decide to try these methods as well as Predicting with trees. I apply the three variables scenarios (13, 22 and 53 variables) with Random Forest, and 53 variables scenario with Boosting and Predicting with trees. Then I compare the accuracies and select the model with the highest accuracy - which in this case turns to be Random Forest with 53 variables trainin data set. 
+
+In all three models I use 5 fold cross validation in caret package in order to avoid overfitting.
+
+## Enable parallel processing to reduce runtimes
+```{r}
+library(doParallel)
+registerDoParallel(cores=2)
+
+```
+
+## Scenario 1:
+Random Forest with 13 variables (12) predictors, with 5 fold cross validation in caret.
+```{r}
+
+library(randomForest)
+library(e1071)
+
+library(base)
+set.seed(1654)
+
+ifelse(file.exists("RFmodFit13.rds"), 
+   RFmodFit13 <- readRDS("RFmodFit13.rds"), 
+                  c(st <- system.time(
+                    RFmodFit13 <- train(classe ~ ., 
+                                 data=corExperimentF1Tr, 
+                                 method="rf",
+                                 trControl=trainControl(method="cv", number = 5), 
+                                 prox=TRUE)),
+                    saveRDS(RFmodFit13, file="RFmodFit13.rds"),
+                    RFmodFit13 <-  readRDS("RFmodFit13.rds")
+                    )
+   )
+```
+
+
+```{r}
+# Confusion matrix - Accuracy of out of sample data set is 0.7137275.
+
+predB13 <- predict(RFmodFit13, newdata=corExperimentF1Tst)
+confusionMatrix(predB13,corExperimentF1Tst$classe)
+AccRFmodFit13 <- confusionMatrix(predB13,corExperimentF1Tst$classe)$overall[1]
+AccRFmodFit13
+
+```
+
+## Scenario 2: 
+Random Forest with 22 variables (21) predictors, with 5 fold cross validation in caret.
+
+```{r}
+library(randomForest)
+library(e1071)
+```
+
+```{r}
+library(base)
+set.seed(2654)
+
+ifelse(file.exists("RFmodFit22.rds"), 
+   RFmodFit22 <- readRDS("RFmodFit22.rds"), 
+                  c(st <- system.time(
+                    RFmodFit22 <- train(classe ~ ., 
+                                 data=vipExperimentF1Tr, 
+                                 method="rf",
+                                 trControl=trainControl(method="cv", number = 5), 
+                                 prox=TRUE)),
+                    saveRDS(RFmodFit22, file="RFmodFit22.rds"),
+                    RFmodFit22 <-  readRDS("RFmodFit22.rds")
+                    )
+   )
+
+```
+
+```{r}
+# Confusion matrix - Accuracy of out of sample test is 0.9151093, which is quite high having in mind the small training data set. It is higher than in Scenario 1 and includes more variables. Seems that  Variable importance is more precise than Correlation method.
+
+predB <- predict(RFmodFit22, newdata=vipExperimentF1Tst)
+confusionMatrix(predB,vipExperimentF1Tst$classe)
+AccRFmodFit22 <- confusionMatrix(predB,vipExperimentF1Tst$classe)$overall[1]
+AccRFmodFit22
+
+```
+
+## Scenario 3:
+Random Forest with 53 variables (52) predictors, with 5 fold cross validation in caret.
+```{r}
+
+library(randomForest)
+library(e1071)
+
+library(base)
+set.seed(3654)
+
+ifelse(file.exists("RFmodFit53.rds"), 
+   RFmodFit53 <- readRDS("RFmodFit53.rds"), 
+                  c(st <- system.time(
+                    RFmodFit53 <- train(classe ~ ., 
+                                 data=NA.Meta.nzv.clean_f1Train, 
+                                 method="rf",
+                                 trControl=trainControl(method="cv", number = 5), 
+                                 prox=TRUE)),
+                    saveRDS(RFmodFit53, file="RFmodFit53.rds"),
+                    RFmodFit53 <-  readRDS("RFmodFit53.rds")
+                    )
+   )
+```
+
+```{r}
+# Confusion matrix - Accuracy of out of sample data set including all 53 variables is 0.952656, higher than previous variants. Perhaps an overfitting occurs. Later I will check for it.
+
+predB53 <- predict(RFmodFit53, newdata=NA.Meta.nzv.clean_f1Test)
+confusionMatrix(predB53,NA.Meta.nzv.clean_f1Test$classe)
+AccRFmodFit53 <- confusionMatrix(predB53,NA.Meta.nzv.clean_f1Test$classe)$overall[1]
+AccRFmodFit53
+
+```
+
+## Boosting with trees
+Using method Boosting with trees with 53 variables (52) predictors, with 5 fold cross validation in caret.
+```{r}
+library(ISLR)
+library(ggplot2)
+library(caret)
+library(gbm)
+
+library(base)
+set.seed(4654)
+
+ifelse(file.exists("GBMmodFit53.rds"), 
+  GBMmodFit53 <- readRDS("GBMmodFit53.rds"), 
+                  c(st <- system.time(
+                    GBMmodFit53 <- train(classe ~ ., 
+                                 data=NA.Meta.nzv.clean_f1Train, 
+                                 method="gbm",
+                                 trControl=trainControl(method="cv", number = 5), 
+                                 verbose=FALSE)),
+                    saveRDS(GBMmodFit53, file="GBMmodFit53.rds"),
+                    GBMmodFit53 <-  readRDS("GBMmodFit53.rds")
+                    )
+   )
+```
+
+```{r}
+# Confusion matrix - Accuracy of out of sample data set is 0.9303432 lower than Random forest.
+
+GBMpredB53 <- predict(GBMmodFit53, newdata=NA.Meta.nzv.clean_f1Test)
+confusionMatrix(GBMpredB53,NA.Meta.nzv.clean_f1Test$classe)
+AccGBMmodFit53 <- confusionMatrix(GBMpredB53,NA.Meta.nzv.clean_f1Test$classe)$overall[1]
+AccGBMmodFit53
+
+```
+
+## Predicting with Trees
+Predicting with Trees with 53 variables (52) predictors, with 5 fold cross validation in caret.  
+Since we do not identify any linear settings this classification model is worth checking, since it provides better performance in nonlinear settings.
+```{r}
+library(caret)
+
+library(base)
+set.seed(5654)
+
+ifelse(file.exists("RPARTmodFit53.rds"), 
+  RPARTmodFit53 <- readRDS("RPARTmodFit53.rds"), 
+                  c(st <- system.time(
+                    RPARTmodFit53 <- train(classe ~ ., 
+                                 data=NA.Meta.nzv.clean_f1Train, 
+                                 method="rpart",
+                                 trControl=trainControl(method="cv", number = 5))),
+                    saveRDS(RPARTmodFit53, file="RPARTmodFit53.rds"),
+                    RPARTmodFit53 <-  readRDS("RPARTmodFit53.rds")
+                    )
+   )
+```
+
+```{r}
+# Confusion matrix - Accuracy of out of sample data set is 0.5379998 the lowest up to now (than Random forest and the rest).
+
+RPARTpredB53 <- predict(RPARTmodFit53, newdata=NA.Meta.nzv.clean_f1Test)
+confusionMatrix(RPARTpredB53,NA.Meta.nzv.clean_f1Test$classe)
+AccRPARTmodFit53 <- confusionMatrix(RPARTpredB53,NA.Meta.nzv.clean_f1Test$classe)$overall[1]
+AccRPARTmodFit53
+
+```
+
+```{r}
+# plot tree
+library(rattle)
+fancyRpartPlot(RPARTmodFit53$finalModel)
+
+```
+
+## Find the model with the best accuracy
+```{r}
+# The best model accuracy is reached by Random Forest model with 53 variables 0.9525428
+df <- t(data.frame(AccRFmodFit22,AccRFmodFit13,AccRFmodFit53,AccGBMmodFit53,AccRPARTmodFit53))
+data.frame(df[order(df,decreasing=T),])
+```
+
+## Avoid overfitting
+In order to avoid overfitting, check the Variable Importance for RF 53 and exclude least important variables afterwards
+
+```{r}
+library(caret)
+
+RF53T <- varImp(RFmodFit53, scale=TRUE) #TRUE to get a scale of 100%
+
+#a needle plot of the model variable importance values
+plot(RF53T,top=length(names(NA.Meta.nzv.clean_f1Train))) 
+
+```
+
+I exclude variables with very low importance (close to 0) shown by rf Variable Importance and train the model again with 48 predictor variables.
+```{r}
+RF53T[1]
+NA.Meta.nzv.overf.clean_f1Train <- NA.Meta.nzv.clean_f1Train[,!(names(NA.Meta.nzv.clean_f1Train) %in% 
+                                                              c("gyros_arm_z","accel_belt_y","gyros_dumbbell_z","gyros_forearm_x"))]
+
+names(NA.Meta.nzv.overf.clean_f1Train)
+
+```
+
+Train the RF model again with reduced number of variables (to avoid overfitting)
+```{r}
+library(randomForest)
+library(e1071)
+
+str(NA.Meta.nzv.overf.clean_f1Train)
+
+library(base)
+set.seed(9654)
+
+ifelse(file.exists("RFmodFitFIN.rds"), 
+   RFmodFitFIN <- readRDS("RFmodFitFIN.rds"), 
+                  c(st <- system.time(
+                    RFmodFitFIN <- train(classe ~ ., 
+                                 data=NA.Meta.nzv.overf.clean_f1Train, 
+                                 method="rf",
+                                 trControl=trainControl(method="cv", number = 5), 
+                                 prox=TRUE)),
+                    saveRDS(RFmodFitFIN, file="RFmodFitFIN.rds"),
+                    RFmodFitFIN <-  readRDS("RFmodFitFIN.rds")
+                    )
+   )
+```
+
+## Out of sample error calculation
+
+Since the levels of Accuracy 0.95 and Out of sample error 0.05 are quite good having in mind the low share of training sample, I decide not to train the model again with bigger train sample, but to try to predict the final 20 test cases instead.
+
+```{r}
+# Confusion matrix showing the accuracy of 0.9512969
+
+RFmodFitFIN$finalModel
+
+predBFIN <- predict(RFmodFitFIN, newdata=NA.Meta.nzv.clean_f1Test)
+confusionMatrix(predBFIN,NA.Meta.nzv.clean_f1Test$classe)
+AccRFmodFitFIN <- confusionMatrix(predBFIN,NA.Meta.nzv.clean_f1Test$classe)$overall[1]
+AccRFmodFitFIN
+```
+
+
+```{r}
+# The expected out of sample error is 0.04870314
+OSE <- 1-AccRFmodFitFIN
+OSE
+```
+
+## Final model testing
+
+```{r}
+# Apply the model to the final testing dataset to predict 20 different test cases. First remove the last column problem_id
+
+predFinRF22 <- predict(RFmodFit22,newdata=NA.Meta.nzv.clean_dataTest[,-length(names(NA.Meta.nzv.clean_dataTest))])
+predFinRF13 <- predict(RFmodFit13,newdata=NA.Meta.nzv.clean_dataTest[,-length(names(NA.Meta.nzv.clean_dataTest))])
+predFinRF53 <- predict(RFmodFit53,newdata=NA.Meta.nzv.clean_dataTest[,-length(names(NA.Meta.nzv.clean_dataTest))])
+predFinGBM53 <- predict(GBMmodFit53,newdata=NA.Meta.nzv.clean_dataTest[,-length(names(NA.Meta.nzv.clean_dataTest))])
+predFinRPART53 <- predict(RPARTmodFit53,newdata=NA.Meta.nzv.clean_dataTest[,-length(names(NA.Meta.nzv.clean_dataTest))])
+predFinFIN <- predict(RFmodFitFIN,newdata=NA.Meta.nzv.clean_dataTest[,-length(names(NA.Meta.nzv.clean_dataTest))])
+
+# Compare the predicted results of different models
+t(data.frame(predFinRF22,predFinRF13,predFinRF53,predFinGBM53,predFinRPART53,predFinFIN))
+
+# The final predicted results - the grader proved 100% accuracy
+predFinFIN
+
+```
+ 
+```{r}
+# Separate the predicted results in files for submission
+# use a character vector with your 20 predictions in order for the 20 problems
+
+answers = rep(predFinRF53, times = 1) #Replicate Elements of Vectors and Lists
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+# create a folder where the files to be written. Set that to be your working directory and run and it will create one file for each submission
+pml_write_files(answers)
+
+```
